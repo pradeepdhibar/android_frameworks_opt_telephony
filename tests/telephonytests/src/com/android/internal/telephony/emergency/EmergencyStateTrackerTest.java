@@ -21,6 +21,7 @@ import static android.telephony.NetworkRegistrationInfo.DOMAIN_CS;
 import static android.telephony.NetworkRegistrationInfo.DOMAIN_CS_PS;
 import static android.telephony.NetworkRegistrationInfo.DOMAIN_PS;
 import static android.telephony.NetworkRegistrationInfo.REGISTRATION_STATE_HOME;
+import static android.telephony.NetworkRegistrationInfo.REGISTRATION_STATE_NOT_REGISTERED_OR_SEARCHING;
 import static android.telephony.TelephonyManager.EMERGENCY_CALLBACK_MODE_CALL;
 import static android.telephony.TelephonyManager.EMERGENCY_CALLBACK_MODE_SMS;
 
@@ -38,7 +39,6 @@ import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyBoolean;
 import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.anyLong;
-import static org.mockito.Mockito.anyVararg;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
@@ -75,10 +75,12 @@ import androidx.test.filters.SmallTest;
 
 import com.android.internal.telephony.Call;
 import com.android.internal.telephony.CallStateException;
+import com.android.internal.telephony.CommandException;
 import com.android.internal.telephony.Connection;
 import com.android.internal.telephony.GsmCdmaPhone;
 import com.android.internal.telephony.Phone;
 import com.android.internal.telephony.PhoneConstants;
+import com.android.internal.telephony.RILConstants;
 import com.android.internal.telephony.TelephonyIntents;
 import com.android.internal.telephony.TelephonyTest;
 import com.android.internal.telephony.data.PhoneSwitcher;
@@ -108,6 +110,12 @@ public class EmergencyStateTrackerTest extends TelephonyTest {
     private static final int TEST_WAIT_FOR_IN_SERVICE_TIMEOUT_MS = 3000;
     private static final EmergencyRegistrationResult E_REG_RESULT = new EmergencyRegistrationResult(
             EUTRAN, REGISTRATION_STATE_HOME, DOMAIN_CS_PS, true, true, 0, 1, "001", "01", "US");
+    private static final EmergencyRegistrationResult UNKNOWN_E_REG_RESULT =
+            new EmergencyRegistrationResult(
+                    AccessNetworkConstants.AccessNetworkType.UNKNOWN,
+                    REGISTRATION_STATE_NOT_REGISTERED_OR_SEARCHING,
+                    NetworkRegistrationInfo.DOMAIN_UNKNOWN,
+                    false, false, 0, 0, "", "", "");
 
     @Mock EmergencyStateTracker.PhoneFactoryProxy mPhoneFactoryProxy;
     @Mock EmergencyStateTracker.PhoneSwitcherProxy mPhoneSwitcherProxy;
@@ -126,6 +134,7 @@ public class EmergencyStateTrackerTest extends TelephonyTest {
                 .when(mTelephonyManagerProxy).getSimState(anyInt());
         doReturn(true).when(mFeatureFlags).emergencyCallbackModeNotification();
         doReturn(true).when(mFeatureFlags).disableEcbmBasedOnRat();
+        doReturn(true).when(mFeatureFlags).performCrossStackRedialCheckForEmergencyCall();
     }
 
     @After
@@ -2529,7 +2538,7 @@ public class EmergencyStateTrackerTest extends TelephonyTest {
         when(phone.getSubId()).thenReturn(1);
         setEcmSupportedConfig(phone, true);
         PersistableBundle bundle = mCarrierConfigManager.getConfigForSubId(phone.getSubId());
-        doReturn(bundle).when(mCarrierConfigManager).getConfigForSubId(anyInt(), anyVararg());
+        doReturn(bundle).when(mCarrierConfigManager).getConfigForSubId(anyInt(), any());
 
         EmergencyStateTracker testEst = setupEmergencyStateTracker(
                 false /* isSuplDdsSwitchRequiredForEmergencyCall */);
@@ -3054,7 +3063,7 @@ public class EmergencyStateTrackerTest extends TelephonyTest {
         PersistableBundle bundle = mCarrierConfigManager.getConfigForSubId(testPhone.getSubId());
         bundle.putBoolean(CarrierConfigManager.KEY_BROADCAST_EMERGENCY_CALL_STATE_CHANGES_BOOL,
                 true);
-        doReturn(bundle).when(mCarrierConfigManager).getConfigForSubId(anyInt(), anyVararg());
+        doReturn(bundle).when(mCarrierConfigManager).getConfigForSubId(anyInt(), any());
         // onCarrierConfigChanged with valid subscription
         carrierConfigChangeListener.onCarrierConfigChanged(
                 testPhone.getPhoneId(), testPhone.getSubId(),
@@ -3492,6 +3501,74 @@ public class EmergencyStateTrackerTest extends TelephonyTest {
         verify(phone1, never()).setEmergencyMode(anyInt(), any(Message.class));
     }
 
+    @Test
+    @SmallTest
+    public void testSwitchPhoneWhenNonEmergencyNtnSessionInProgress() {
+        EmergencyStateTracker emergencyStateTracker = setupEmergencyStateTracker(
+                /* isSuplDdsSwitchRequiredForEmergencyCall= */ true);
+        Phone phone0 = setupTestPhoneForEmergencyCall(/* isRoaming= */ true,
+                /* isRadioOn= */ true);
+        setUpAsyncResultForSetEmergencyMode(
+                phone0, UNKNOWN_E_REG_RESULT, RILConstants.INTERNAL_ERR);
+        // Start an emergency call over Phone0
+        CompletableFuture<Integer> future = emergencyStateTracker.startEmergencyCall(phone0,
+                mTestConnection1, false);
+
+        Phone phone1 = getPhone(1);
+        // Phone0: Disable NTN
+        doReturn(SubscriptionManager.INVALID_SUBSCRIPTION_ID)
+                .when(phone0).getSubId();
+        doReturn(TelephonyManager.SIM_STATE_ABSENT)
+                .when(mTelephonyManagerProxy).getSimState(eq(0));
+        // Phone1: Enable TN
+        doReturn(2).when(phone1).getSubId();
+        doReturn(TelephonyManager.SIM_STATE_READY)
+                .when(mTelephonyManagerProxy).getSimState(eq(1));
+
+        processAllMessages();
+
+        verify(phone0).setEmergencyMode(eq(MODE_EMERGENCY_WWAN), any(Message.class));
+        assertFalse(emergencyStateTracker.isInEmergencyMode());
+        assertTrue(future.isDone());
+        // Expect: DisconnectCause#EMERGENCY_PERM_FAILURE
+        assertEquals(future.getNow(DisconnectCause.NOT_DISCONNECTED),
+                Integer.valueOf(DisconnectCause.EMERGENCY_PERM_FAILURE));
+    }
+
+    @Test
+    @SmallTest
+    public void testSwitchPhoneWhenNonEmergencyNtnSessionInProgressAndFlagDisabled() {
+        doReturn(false).when(mFeatureFlags).performCrossStackRedialCheckForEmergencyCall();
+        EmergencyStateTracker emergencyStateTracker = setupEmergencyStateTracker(
+                /* isSuplDdsSwitchRequiredForEmergencyCall= */ true);
+        Phone phone0 = setupTestPhoneForEmergencyCall(/* isRoaming= */ true,
+                /* isRadioOn= */ true);
+        setUpAsyncResultForSetEmergencyMode(
+                phone0, UNKNOWN_E_REG_RESULT, RILConstants.INTERNAL_ERR);
+        // Start an emergency call over Phone0
+        CompletableFuture<Integer> future = emergencyStateTracker.startEmergencyCall(phone0,
+                mTestConnection1, false);
+
+        Phone phone1 = getPhone(1);
+        // Phone0: Disable NTN
+        doReturn(SubscriptionManager.INVALID_SUBSCRIPTION_ID)
+                .when(phone0).getSubId();
+        doReturn(TelephonyManager.SIM_STATE_ABSENT)
+                .when(mTelephonyManagerProxy).getSimState(eq(0));
+        // Phone1: Enable TN
+        doReturn(2).when(phone1).getSubId();
+        doReturn(TelephonyManager.SIM_STATE_READY)
+                .when(mTelephonyManagerProxy).getSimState(eq(1));
+
+        processAllMessages();
+
+        verify(phone0).setEmergencyMode(eq(MODE_EMERGENCY_WWAN), any(Message.class));
+        assertTrue(future.isDone());
+        // Expect: DisconnectCause#NOT_DISCONNECTED
+        assertEquals(future.getNow(DisconnectCause.NOT_DISCONNECTED),
+                Integer.valueOf(DisconnectCause.NOT_DISCONNECTED));
+    }
+
     private EmergencyStateTracker setupEmergencyStateTracker(
             boolean isSuplDdsSwitchRequiredForEmergencyCall) {
         doReturn(mPhoneSwitcher).when(mPhoneSwitcherProxy).getPhoneSwitcher();
@@ -3567,6 +3644,17 @@ public class EmergencyStateTrackerTest extends TelephonyTest {
             Object[] args = invocation.getArguments();
             final Message msg = (Message) args[1];
             AsyncResult.forMessage(msg, regResult, null);
+            msg.sendToTarget();
+            return null;
+        }).when(phone).setEmergencyMode(anyInt(), any(Message.class));
+    }
+
+    private void setUpAsyncResultForSetEmergencyMode(Phone phone,
+            EmergencyRegistrationResult regResult, int rilError) {
+        doAnswer((invocation) -> {
+            Object[] args = invocation.getArguments();
+            final Message msg = (Message) args[1];
+            AsyncResult.forMessage(msg, regResult, CommandException.fromRilErrno(rilError));
             msg.sendToTarget();
             return null;
         }).when(phone).setEmergencyMode(anyInt(), any(Message.class));
