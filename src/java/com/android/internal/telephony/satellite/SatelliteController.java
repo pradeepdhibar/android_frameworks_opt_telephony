@@ -692,6 +692,7 @@ public class SatelliteController extends Handler {
     private AtomicBoolean mOverrideNtnEligibility;
     private String mDefaultSmsPackageName = "";
     private String mSatelliteGatewayServicePackageName = "";
+    private Boolean mOverriddenDisableSatelliteWhileEnableInProgressSupported = null;
 
     private final Object mNtnSmsSupportedByMessagesAppLock = new Object();
     @GuardedBy("mNtnSmsSupportedByMessagesAppLock")
@@ -1567,7 +1568,7 @@ public class SatelliteController extends Handler {
                     mSessionMetricsStats.setInitializationResult(error)
                             .setSatelliteTechnology(getSupportedNtnRadioTechnology())
                             .setInitializationProcessingTime(
-                                    System.currentTimeMillis() - mSessionProcessingTimeStamp)
+                                    getElapsedRealtime() - mSessionProcessingTimeStamp)
                             .setIsDemoMode(mIsDemoModeEnabled)
                             .setCarrierId(getSatelliteCarrierId())
                             .setIsEmergency(argument.isEmergency);
@@ -1583,7 +1584,7 @@ public class SatelliteController extends Handler {
                     }
                 } else {
                     mSessionMetricsStats.setTerminationResult(error)
-                            .setTerminationProcessingTime(System.currentTimeMillis()
+                            .setTerminationProcessingTime(getElapsedRealtime()
                                     - mSessionProcessingTimeStamp)
                             .setSessionDurationSec(calculateSessionDurationTimeSec())
                             .reportSessionMetrics();
@@ -2503,6 +2504,13 @@ public class SatelliteController extends Handler {
                                 SatelliteManager.SATELLITE_RESULT_ENABLE_IN_PROGRESS, result);
                         return;
                     }
+                    if (!isDisableSatelliteWhileEnableInProgressSupported()) {
+                        plogd("requestSatelliteEnabled: disable satellite while enable in progress"
+                                + " is not supported");
+                        sendErrorAndReportSessionMetrics(
+                                SatelliteManager.SATELLITE_RESULT_ENABLE_IN_PROGRESS, result);
+                        return;
+                    }
                     mSatelliteDisabledRequest = request;
                 }
             }
@@ -2521,6 +2529,14 @@ public class SatelliteController extends Handler {
         } else {
             sendRequestAsync(CMD_SET_SATELLITE_ENABLED, request, null);
         }
+    }
+
+    private boolean isDisableSatelliteWhileEnableInProgressSupported() {
+        if (mOverriddenDisableSatelliteWhileEnableInProgressSupported != null) {
+            return mOverriddenDisableSatelliteWhileEnableInProgressSupported;
+        }
+        return mContext.getResources().getBoolean(
+            R.bool.config_support_disable_satellite_while_enable_in_progress);
     }
 
     private void checkNetworkSelectionModeAuto(RequestSatelliteEnabledArgument argument) {
@@ -3588,6 +3604,31 @@ public class SatelliteController extends Handler {
     }
 
     /**
+     * This API can be used by only CTS to control the feature
+     * {@code config_support_disable_satellite_while_enable_in_progress}.
+     *
+     * @param reset Whether to reset the override.
+     * @param supported Whether to support the feature.
+     * @return {@code true} if the value is set successfully, {@code false} otherwise.
+     */
+    public boolean setSupportDisableSatelliteWhileEnableInProgress(
+        boolean reset, boolean supported) {
+        if (!isMockModemAllowed()) {
+            plogd("setSupportDisableSatelliteWhileEnableInProgress: mock modem not allowed");
+            return false;
+        }
+
+        plogd("setSupportDisableSatelliteWhileEnableInProgress - reset=" + reset
+                  + ", supported=" + supported);
+        if (reset) {
+            mOverriddenDisableSatelliteWhileEnableInProgressSupported = null;
+        } else {
+            mOverriddenDisableSatelliteWhileEnableInProgressSupported = supported;
+        }
+        return true;
+    }
+
+    /**
      * This API can be used by only CTS to override timeout durations used by DatagramController
      * module.
      *
@@ -4210,7 +4251,7 @@ public class SatelliteController extends Handler {
      * @return {@code true} if phone is in carrier roaming nb iot ntn mode,
      * else {@return false}
      */
-    private boolean isInCarrierRoamingNbIotNtn(@Nullable Phone phone) {
+    public boolean isInCarrierRoamingNbIotNtn(@Nullable Phone phone) {
         if (!mFeatureFlags.carrierRoamingNbIotNtn()) {
             plogd("isInCarrierRoamingNbIotNtn: carrier roaming nb iot ntn "
                     + "feature flag is disabled");
@@ -4664,9 +4705,9 @@ public class SatelliteController extends Handler {
         startWaitForSatelliteEnablingResponseTimer(argument);
         // Logs satellite session timestamps for session metrics
         if (argument.enableSatellite) {
-            mSessionStartTimeStamp = System.currentTimeMillis();
+            mSessionStartTimeStamp = getElapsedRealtime();
         }
-        mSessionProcessingTimeStamp = System.currentTimeMillis();
+        mSessionProcessingTimeStamp = getElapsedRealtime();
     }
 
     /** Get the request attributes that modem needs to enable/disable satellite */
@@ -6394,7 +6435,7 @@ public class SatelliteController extends Handler {
                 // Log satellite session end
                 CarrierRoamingSatelliteSessionStats sessionStats =
                         mCarrierRoamingSatelliteSessionStatsMap.get(subId);
-                sessionStats.onSessionEnd();
+                sessionStats.onSessionEnd(subId);
                 mCarrierRoamingSatelliteSessionStatsMap.remove(subId);
                 mCarrierRoamingSatelliteControllerStats.onSessionEnd(subId);
             }
@@ -6813,7 +6854,7 @@ public class SatelliteController extends Handler {
             mSessionMetricsStats.setInitializationResult(SATELLITE_RESULT_MODEM_TIMEOUT)
                     .setSatelliteTechnology(getSupportedNtnRadioTechnology())
                     .setInitializationProcessingTime(
-                            System.currentTimeMillis() - mSessionProcessingTimeStamp)
+                            getElapsedRealtime() - mSessionProcessingTimeStamp)
                     .setIsDemoMode(mIsDemoModeEnabled)
                     .setCarrierId(getSatelliteCarrierId())
                     .reportSessionMetrics();
@@ -6823,7 +6864,7 @@ public class SatelliteController extends Handler {
             mSessionMetricsStats.setTerminationResult(SATELLITE_RESULT_MODEM_TIMEOUT)
                     .setSatelliteTechnology(getSupportedNtnRadioTechnology())
                     .setTerminationProcessingTime(
-                            System.currentTimeMillis() - mSessionProcessingTimeStamp)
+                            getElapsedRealtime() - mSessionProcessingTimeStamp)
                     .setSessionDurationSec(calculateSessionDurationTimeSec())
                     .reportSessionMetrics();
         }
@@ -7183,7 +7224,7 @@ public class SatelliteController extends Handler {
     // Should be invoked only when session termination done or session termination failed.
     private int calculateSessionDurationTimeSec() {
         return (int) (
-                (System.currentTimeMillis() - mSessionStartTimeStamp
+                (getElapsedRealtime() - mSessionStartTimeStamp
                 - mSessionMetricsStats.getSessionInitializationProcessingTimeMillis()
                 - mSessionMetricsStats.getSessionTerminationProcessingTimeMillis()) / 1000);
     }

@@ -643,6 +643,8 @@ public class SatelliteControllerTest extends TelephonyTest {
         mContextFixture.putIntArrayResource(
                 R.array.config_foldedDeviceStates,
                 new int[0]);
+        mContextFixture.putBooleanResource(
+            R.bool.config_support_disable_satellite_while_enable_in_progress, true);
         doReturn(ACTIVE_SUB_IDS).when(mMockSubscriptionManagerService).getActiveSubIdList(true);
 
         mCarrierConfigBundle = mContextFixture.getCarrierConfigBundle();
@@ -3965,6 +3967,8 @@ public class SatelliteControllerTest extends TelephonyTest {
         when(mFeatureFlags.carrierRoamingNbIotNtn()).thenReturn(true);
         when(mServiceState.getState()).thenReturn(ServiceState.STATE_OUT_OF_SERVICE);
         when(mServiceState2.getState()).thenReturn(ServiceState.STATE_OUT_OF_SERVICE);
+        when(mServiceState.getNetworkRegistrationInfo(anyInt(), anyInt())).thenReturn(null);
+        when(mServiceState2.getNetworkRegistrationInfo(anyInt(), anyInt())).thenReturn(null);
         mSatelliteControllerUT.mIsApplicationSupportsP2P = true;
         mCarrierConfigBundle.putBoolean(KEY_SATELLITE_ATTACH_SUPPORTED_BOOL, true);
         mCarrierConfigBundle.putInt(KEY_CARRIER_ROAMING_NTN_CONNECT_TYPE_INT, 1);
@@ -4028,6 +4032,8 @@ public class SatelliteControllerTest extends TelephonyTest {
         when(mFeatureFlags.carrierRoamingNbIotNtn()).thenReturn(true);
         when(mServiceState2.getState()).thenReturn(ServiceState.STATE_OUT_OF_SERVICE);
         when(mServiceState.getState()).thenReturn(ServiceState.STATE_OUT_OF_SERVICE);
+        when(mServiceState.getNetworkRegistrationInfo(anyInt(), anyInt())).thenReturn(null);
+        when(mServiceState2.getNetworkRegistrationInfo(anyInt(), anyInt())).thenReturn(null);
         mSatelliteControllerUT.mIsApplicationSupportsP2P = true;
         mSatelliteControllerUT.setIsSatelliteSupported(true);
         mCarrierConfigBundle.putBoolean(KEY_SATELLITE_ATTACH_SUPPORTED_BOOL, true);
@@ -4613,6 +4619,8 @@ public class SatelliteControllerTest extends TelephonyTest {
                 eq(R.string.config_satellite_gateway_service_package));
         doReturn("className").when(mResources).getString(
                 eq(R.string.config_satellite_carrier_roaming_esos_provisioned_class));
+        doReturn(true).when(mResources).getBoolean(
+                eq(R.bool.config_support_disable_satellite_while_enable_in_progress));
     }
 
     private List<SatelliteSubscriberInfo> getExpectedSatelliteSubscriberInfoList() {
@@ -6890,6 +6898,8 @@ public class SatelliteControllerTest extends TelephonyTest {
         when(mFeatureFlags.carrierRoamingNbIotNtn()).thenReturn(true);
         when(mServiceState.getState()).thenReturn(ServiceState.STATE_OUT_OF_SERVICE);
         when(mServiceState2.getState()).thenReturn(ServiceState.STATE_OUT_OF_SERVICE);
+        when(mServiceState.getNetworkRegistrationInfo(anyInt(), anyInt())).thenReturn(null);
+        when(mServiceState2.getNetworkRegistrationInfo(anyInt(), anyInt())).thenReturn(null);
         mSatelliteControllerUT.mIsApplicationSupportsP2P = true;
         mCarrierConfigBundle.putBoolean(KEY_SATELLITE_ATTACH_SUPPORTED_BOOL, true);
         mCarrierConfigBundle.putInt(KEY_CARRIER_ROAMING_NTN_CONNECT_TYPE_INT, 1);
