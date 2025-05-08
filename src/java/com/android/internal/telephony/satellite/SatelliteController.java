@@ -388,6 +388,11 @@ public class SatelliteController extends Handler {
     private AtomicBoolean mIsDemoModeEnabled = new AtomicBoolean(false);
     private AtomicBoolean mIsEmergency = new AtomicBoolean(false);
     private AtomicBoolean mIsSatelliteEnabled = null;
+    @VisibleForTesting(visibility = VisibleForTesting.Visibility.PRIVATE)
+    protected AtomicBoolean mIsRadioOn = new AtomicBoolean(false);
+    @VisibleForTesting(visibility = VisibleForTesting.Visibility.PRIVATE)
+    protected AtomicBoolean mRadioOffRequested = new AtomicBoolean(false);
+    private AtomicBoolean mIgnorePlmnListFromStorage = new AtomicBoolean(false);
 
     private final Object mSatelliteEnabledRequestLock = new Object();
     /* This variable is used to store the first enable request that framework has received in the
@@ -480,13 +485,6 @@ public class SatelliteController extends Handler {
     private final ConcurrentHashMap<IBinder, ISelectedNbIotSatelliteSubscriptionCallback>
             mSelectedNbIotSatelliteSubscriptionChangedListeners = new ConcurrentHashMap<>();
 
-    @VisibleForTesting(visibility = VisibleForTesting.Visibility.PRIVATE)
-    protected final Object mIsRadioOnLock = new Object();
-    @VisibleForTesting(visibility = VisibleForTesting.Visibility.PRIVATE)
-    protected boolean mIsRadioOn;
-    @GuardedBy("mIsRadioOnLock")
-    @VisibleForTesting(visibility = VisibleForTesting.Visibility.PRIVATE)
-    protected boolean mRadioOffRequested = false;
     @VisibleForTesting(visibility = VisibleForTesting.Visibility.PRIVATE)
     protected final Object mDeviceProvisionLock = new Object();
     @VisibleForTesting(visibility = VisibleForTesting.Visibility.PRIVATE)
@@ -943,9 +941,7 @@ public class SatelliteController extends Handler {
                 mContext, looper, mFeatureFlags, mPointingAppController);
 
         mCi.registerForRadioStateChanged(this, EVENT_RADIO_STATE_CHANGED, null);
-        synchronized (mIsRadioOnLock) {
-            mIsRadioOn = phone.isRadioOn();
-        }
+        mIsRadioOn.set(phone.isRadioOn());
 
         registerForPendingDatagramCount();
         registerForSatelliteModemStateChanged();
@@ -1832,20 +1828,16 @@ public class SatelliteController extends Handler {
             }
 
             case EVENT_RADIO_STATE_CHANGED: {
-                synchronized (mIsRadioOnLock) {
-                    logd("EVENT_RADIO_STATE_CHANGED: radioState=" + mCi.getRadioState());
-                    if (mCi.getRadioState() == TelephonyManager.RADIO_POWER_ON) {
-                        mIsRadioOn = true;
-                    } else if (mCi.getRadioState() == TelephonyManager.RADIO_POWER_OFF) {
-                        resetCarrierRoamingSatelliteModeParams();
-                        synchronized (mIsRadioOnLock) {
-                            if (mRadioOffRequested) {
-                                logd("EVENT_RADIO_STATE_CHANGED: set mIsRadioOn to false");
-                                stopWaitForCellularModemOffTimer();
-                                mIsRadioOn = false;
-                                mRadioOffRequested = false;
-                            }
-                        }
+                logd("EVENT_RADIO_STATE_CHANGED: radioState=" + mCi.getRadioState());
+                if (mCi.getRadioState() == TelephonyManager.RADIO_POWER_ON) {
+                    mIsRadioOn.set(true);
+                } else if (mCi.getRadioState() == TelephonyManager.RADIO_POWER_OFF) {
+                    resetCarrierRoamingSatelliteModeParams();
+                    if (mRadioOffRequested.get()) {
+                        logd("EVENT_RADIO_STATE_CHANGED: set mIsRadioOn to false");
+                        stopWaitForCellularModemOffTimer();
+                        mIsRadioOn.set(false);
+                        mRadioOffRequested.set(false);
                     }
                 }
 
@@ -2162,9 +2154,7 @@ public class SatelliteController extends Handler {
 
             case EVENT_WAIT_FOR_CELLULAR_MODEM_OFF_TIMED_OUT: {
                 plogw("Timed out to wait for cellular modem OFF state");
-                synchronized (mIsRadioOnLock) {
-                    mRadioOffRequested = false;
-                }
+                mRadioOffRequested.set(false);
                 break;
             }
 
@@ -2697,19 +2687,17 @@ public class SatelliteController extends Handler {
         }
 
         if (enableSatellite) {
-            synchronized (mIsRadioOnLock) {
-                if (!mIsRadioOn) {
-                    ploge("Radio is not on, can not enable satellite");
-                    sendErrorAndReportSessionMetrics(
-                            SatelliteManager.SATELLITE_RESULT_INVALID_MODEM_STATE, result);
-                    return;
-                }
-                if (mRadioOffRequested) {
-                    ploge("Radio is being powering off, can not enable satellite");
-                    sendErrorAndReportSessionMetrics(
-                            SatelliteManager.SATELLITE_RESULT_INVALID_MODEM_STATE, result);
-                    return;
-                }
+            if (!mIsRadioOn.get()) {
+                ploge("Radio is not on, can not enable satellite");
+                sendErrorAndReportSessionMetrics(
+                        SatelliteManager.SATELLITE_RESULT_INVALID_MODEM_STATE, result);
+                return;
+            }
+            if (mRadioOffRequested.get()) {
+                ploge("Radio is being powering off, can not enable satellite");
+                sendErrorAndReportSessionMetrics(
+                        SatelliteManager.SATELLITE_RESULT_INVALID_MODEM_STATE, result);
+                return;
             }
 
             if (mTelecomManager.isInEmergencyCall()) {
@@ -4361,9 +4349,7 @@ public class SatelliteController extends Handler {
     public void onSetCellularRadioPowerStateRequested(boolean powerOn) {
         logd("onSetCellularRadioPowerStateRequested: powerOn=" + powerOn);
 
-        synchronized (mIsRadioOnLock) {
-            mRadioOffRequested = !powerOn;
-        }
+        mRadioOffRequested.set(!powerOn);
         if (powerOn) {
             stopWaitForCellularModemOffTimer();
         } else {
@@ -4388,10 +4374,8 @@ public class SatelliteController extends Handler {
      */
     public void onPowerOffCellularRadioFailed() {
         logd("onPowerOffCellularRadioFailed");
-        synchronized (mIsRadioOnLock) {
-            mRadioOffRequested = false;
-            stopWaitForCellularModemOffTimer();
-        }
+        mRadioOffRequested.set(false);
+        stopWaitForCellularModemOffTimer();
     }
 
     /**
@@ -5914,7 +5898,8 @@ public class SatelliteController extends Handler {
                 obtainMessage(EVENT_SET_SATELLITE_PLMN_INFO_DONE));
     }
 
-    private Set<String> getAllPlmnSet() {
+    @VisibleForTesting(visibility = VisibleForTesting.Visibility.PACKAGE)
+    protected Set<String> getAllPlmnSet() {
         Set<String> allPlmnSetFromSubInfo = new HashSet<>();
         int[] activeSubIdArray = mSubscriptionManagerService.getActiveSubIdList(true);
         for (int activeSubId : activeSubIdArray) {
@@ -5922,6 +5907,12 @@ public class SatelliteController extends Handler {
             allPlmnSetFromSubInfo.addAll(getBarredPlmnList(activeSubId));
         }
         allPlmnSetFromSubInfo.addAll(mSatellitePlmnListFromOverlayConfig);
+
+        if (mIgnorePlmnListFromStorage.get()) {
+            // Do not use PLMN list from storage
+            plogd("getAllPlmnList: allPlmnSetFromSubInfo=" + allPlmnSetFromSubInfo);
+            return allPlmnSetFromSubInfo;
+        }
 
         Set<String> allPlmnListFromStorage = getCarrierRoamingNtnAllSatellitePlmnSetFromStorage();
         if (!allPlmnListFromStorage.containsAll(allPlmnSetFromSubInfo)) {
@@ -7167,17 +7158,15 @@ public class SatelliteController extends Handler {
     }
 
     private void startWaitForCellularModemOffTimer() {
-        synchronized (mIsRadioOnLock) {
-            if (hasMessages(EVENT_WAIT_FOR_CELLULAR_MODEM_OFF_TIMED_OUT)) {
-                plogd("startWaitForCellularModemOffTimer: the timer was already started");
-                return;
-            }
-            long timeoutMillis = getWaitForCellularModemOffTimeoutMillis();
-            plogd("Start timer to wait for cellular modem OFF state, timeoutMillis="
-                    + timeoutMillis);
-            sendMessageDelayed(obtainMessage(EVENT_WAIT_FOR_CELLULAR_MODEM_OFF_TIMED_OUT),
-                    timeoutMillis);
+        if (hasMessages(EVENT_WAIT_FOR_CELLULAR_MODEM_OFF_TIMED_OUT)) {
+            plogd("startWaitForCellularModemOffTimer: the timer was already started");
+            return;
         }
+        long timeoutMillis = getWaitForCellularModemOffTimeoutMillis();
+        plogd("Start timer to wait for cellular modem OFF state, timeoutMillis="
+                + timeoutMillis);
+        sendMessageDelayed(obtainMessage(EVENT_WAIT_FOR_CELLULAR_MODEM_OFF_TIMED_OUT),
+                timeoutMillis);
     }
 
     private void stopWaitForCellularModemOffTimer() {
@@ -8770,7 +8759,7 @@ public class SatelliteController extends Handler {
             return false;
         }
 
-        if (!mIsRadioOn) {
+        if (!mIsRadioOn.get()) {
             plogd("isCarrierRoamingNtnEligible: radio is off");
             return false;
         }
@@ -9887,5 +9876,18 @@ public class SatelliteController extends Handler {
         }
 
         return getSatelliteDataServicePolicyForPlmn(subId, "");
+    }
+
+    /**
+     * This API can be used by only CTS to make the function {@link #getAllPlmnSet()} to exclude the
+     * PLMN list from storage from the returned result.
+     *
+     * @param enabled Whether to enable boolean config.
+     * @return {@code true} if the value is set successfully, {@code false} otherwise.
+     */
+    public boolean setSatelliteIgnorePlmnListFromStorage(boolean enabled) {
+        plogd("setSatelliteIgnorePlmnListFromStorage - " + enabled);
+        mIgnorePlmnListFromStorage.set(enabled);
+        return true;
     }
 }
